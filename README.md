@@ -14,7 +14,7 @@ cloud, Google Docs, OAuth, provider, KMS, database, or secret-storage services.
 ## Run
 
 ```sh
-scripts/run-m5-harness.sh
+scripts/run-tests
 ```
 
 ## Demo

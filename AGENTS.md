@@ -15,5 +15,5 @@
 Run:
 
 ```sh
-scripts/run-m5-harness.sh
+scripts/run-tests
 ```
