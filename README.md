@@ -1,7 +1,10 @@
 # AI Assist Integration Tests
 
-This repo owns local cross-repo integration harnesses for AI Assist milestone
-flows. The first harness proves the Ask And Stream path:
+This repo owns local cross-repo integration harnesses for AI Assist product
+flows. It should evolve as each milestone adds behavior instead of creating
+milestone-specific test repos or runtime packages.
+
+The first covered vertical proves the assistant stream path:
 
 ```text
 user command -> orchestration -> context/read path -> provider adapter

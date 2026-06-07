@@ -1,2 +1,1 @@
-"""Local Ask And Stream integration harness."""
-
+"""Local assistant stream integration harness."""

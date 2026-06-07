@@ -2,10 +2,11 @@
 
 ## Repo Instructions
 
-- This repo owns local cross-repo integration harnesses for AI Assist milestone flows.
+- This repo owns local cross-repo integration harnesses for AI Assist product flows.
+- Evolve existing harnesses as milestones add behavior; do not create milestone-specific runtime packages.
 - Keep harnesses deterministic and dependency-light.
 - Do not call real cloud, Google Docs, OAuth, provider, KMS, database, or secret-storage services.
-- Prefer Python stdlib unless a milestone explicitly needs a browser or package dependency.
+- Prefer Python stdlib unless a product flow explicitly needs a browser or package dependency.
 - Add sibling service repos to `sys.path` only inside harness/test bootstrap code; do not vendor service code here.
 - Keep runtime class, DTO, event, CSS, and log names product-generic. Milestone labels may appear in docs, test names, script names, and demo text.
 - Keep local prompts, feedback, logs, coverage, dependency, and build output out of git history.

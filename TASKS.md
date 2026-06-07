@@ -1,9 +1,9 @@
 # Task Breakdown
 
-Update this file as implementation progresses. Canonical cross-repo milestone
-tracking lives in `../ai-assist-architecture/milestones/m5-ask-and-stream.md`.
+Update this file as integration coverage evolves. Canonical cross-repo milestone
+tracking stays in `../ai-assist-architecture/milestones/`.
 
-## M5 Ask And Stream Harness
+## Assistant Stream Vertical
 
 - [x] Create a dedicated sibling integration-test repo.
 - [x] Add fake authenticated identity for tenant, user, session, request, and correlation IDs.
@@ -15,3 +15,9 @@ tracking lives in `../ai-assist-architecture/milestones/m5-ask-and-stream.md`.
 - [x] Cover one happy path and one provider dependency failure path.
 - [x] Verify emitted events are metadata-safe outside active user-visible assistant output.
 - [x] Add one-command harness runner.
+
+## Planned Evolution
+
+- Extend the same harness for durable proposed actions when that milestone starts.
+- Extend the same harness for safe Google Docs apply behavior when that milestone starts.
+- Keep one `scripts/run-tests` command as the repo grows.

@@ -1,6 +1,5 @@
 [project]
 name = "ai-assist-integration-tests"
 version = "0.1.0"
-description = "Local integration harnesses for AI Assist milestone flows"
+description = "Local integration harnesses for AI Assist product flows"
 requires-python = ">=3.11"
-

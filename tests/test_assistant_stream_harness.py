@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - documented optional browser dependency
     sync_playwright = None
 
 
-class AskAndStreamHarnessTest(unittest.TestCase):
+class AssistantStreamHarnessTest(unittest.TestCase):
     def test_happy_path_emits_valid_ordered_session_events_and_sse_frames(self) -> None:
         app = HarnessApp()
 
@@ -62,7 +62,7 @@ class AskAndStreamHarnessTest(unittest.TestCase):
         try:
             with request.urlopen(f"{base_url}/", timeout=5) as response:
                 html = response.read().decode("utf-8")
-            self.assertIn("Ask And Stream Harness", html)
+            self.assertIn("Assistant Stream Harness", html)
             self.assertIn("EventSource", html)
 
             command_request = request.Request(

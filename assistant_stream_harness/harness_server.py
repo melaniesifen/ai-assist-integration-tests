@@ -277,12 +277,12 @@ def create_handler(app: HarnessApp):
 def serve(host: str, port: int) -> None:
     app = HarnessApp()
     server = ThreadingHTTPServer((host, port), create_handler(app))
-    print(f"Serving Ask And Stream harness at http://{host}:{port}/")
+    print(f"Serving assistant stream harness at http://{host}:{port}/")
     server.serve_forever()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the local Ask And Stream harness server.")
+    parser = argparse.ArgumentParser(description="Run the local assistant stream harness server.")
     parser.add_argument("--serve", action="store_true", help="Start the local HTTP/SSE demo server.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -300,7 +300,7 @@ INDEX_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ask And Stream Harness</title>
+  <title>Assistant Stream Harness</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #111827; }
     main { max-width: 960px; margin: 0 auto; }
@@ -315,7 +315,7 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
 <main>
-  <h1>Ask And Stream Harness</h1>
+  <h1>Assistant Stream Harness</h1>
   <p>Local fake-backed command, orchestration, session event, SSE, and UI path.</p>
   <button id="send">Send command</button>
   <button id="fail">Run provider failure</button>
