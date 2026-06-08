@@ -26,3 +26,12 @@ class FakeIdentity:
             "contextMode": "SELECTION",
             "secretRef": "session_secret_demo",
         }
+
+    def action_decision(self, action_id: str) -> dict[str, str]:
+        return {
+            "actionId": action_id,
+            "requestId": self.request_id,
+            "correlationId": self.correlation_id,
+            "sessionId": self.session_id,
+            "resourceId": "google_doc_demo",
+        }

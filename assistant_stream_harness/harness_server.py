@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,7 +21,10 @@ for service_src_path in SERVICE_SRC_PATHS:
         sys.path.insert(0, path_text)
 
 from ai_assist_orchestration import OrchestrationError, create_command_service
+from ai_assist_orchestration import InMemoryActionStore, create_action_service
 from ai_assist_session_events import (
+    create_action_proposed_event,
+    create_action_status_changed_event,
     create_assistant_delta_event,
     create_assistant_final_event,
     create_progress_event,
@@ -30,15 +34,19 @@ from ai_assist_session_events import (
     validate_session_event,
 )
 
+from .fake_actions import AllowApplyConsent, FakeActionConnector, FakePayloadVault
 from .fake_context import AllowPolicy, FakeContextService, PromptBuilder
 from .fake_identity import FakeIdentity
 from .fake_provider import FakeProviderStream
 
+EVENT_TYPE_ACTION_PROPOSED = "action.proposed"
+EVENT_TYPE_ACTION_STATUS_CHANGED = "action.status_changed"
 EVENT_TYPE_PROGRESS = "progress"
 EVENT_TYPE_ASSISTANT_DELTA = "assistant.delta"
 EVENT_TYPE_ASSISTANT_FINAL = "assistant.final"
 EVENT_TYPE_ERROR = "error"
 TERMINAL_EVENT_TYPES = {EVENT_TYPE_ASSISTANT_FINAL, EVENT_TYPE_ERROR}
+ACTION_TYPE_EVENT_VALUES = {"replace_text": "REPLACE_TEXT", "insert_text": "INSERT_TEXT"}
 SAFE_AUDIT_FORBIDDEN_TERMS = (
     "providerKey",
     "apiKey",
@@ -51,6 +59,10 @@ SAFE_AUDIT_FORBIDDEN_TERMS = (
     "selectedText",
     "raw document",
     "raw prompt",
+    "Synthetic sentence with passive wording.",
+    "Synthetic sentence with direct wording.",
+    "Synthetic summary that repeats itself.",
+    "Synthetic summary with repetition removed.",
 )
 
 
@@ -166,6 +178,30 @@ class EventBridge:
                 metadata=flat_event.get("metadata"),
                 now=self.clock,
             )
+        if event_type == EVENT_TYPE_ACTION_PROPOSED:
+            resource_ref = flat_event.get("resourceRef") if isinstance(flat_event.get("resourceRef"), dict) else {}
+            return create_action_proposed_event(
+                envelope,
+                action_id=flat_event["actionId"],
+                action_type=ACTION_TYPE_EVENT_VALUES.get(flat_event.get("actionType"), flat_event.get("actionType")),
+                resource_ref={
+                    "connector": resource_ref.get("connector") or resource_ref.get("provider") or "google_docs",
+                    "resourceId": resource_ref.get("resourceId"),
+                    "resourceType": resource_ref.get("resourceType") or "document",
+                },
+                summary=flat_event["summary"],
+                expires_at=flat_event["expiresAt"],
+                now=self.clock,
+            )
+        if event_type == EVENT_TYPE_ACTION_STATUS_CHANGED:
+            return create_action_status_changed_event(
+                envelope,
+                action_id=flat_event["actionId"],
+                previous_status=flat_event["previousStatus"],
+                status=flat_event["status"],
+                reason_code=flat_event["reasonCode"],
+                now=self.clock,
+            )
         raise OrchestrationError(
             code="SESSION_EVENT_UNSUPPORTED",
             category="VALIDATION",
@@ -178,17 +214,26 @@ class HarnessApp:
     def __init__(self) -> None:
         self.identity = FakeIdentity()
         self.bridge = EventBridge(self.identity)
+        self.action_store = InMemoryActionStore()
+        self.payload_vault = FakePayloadVault()
+        self.action_service = self._create_action_service()
 
     async def run_command(self, *, mode: str = "happy") -> dict[str, Any]:
         self.bridge.reset()
+        if mode == "proposed_actions":
+            self.action_store = InMemoryActionStore()
+            self.payload_vault = FakePayloadVault()
+            sequential_action_id.counter = 0
+            self.action_service = self._create_action_service()
         context_service = FakeContextService(unavailable=mode == "context_failure")
-        provider = FakeProviderStream(failure=mode == "provider_failure")
+        provider = FakeProviderStream(failure=mode == "provider_failure", proposals=mode == "proposed_actions")
         service = create_command_service(
             context_service=context_service,
             provider_registry={"openai": provider},
             event_publisher=self.bridge,
             policy_service=AllowPolicy(),
             prompt_builder=PromptBuilder(),
+            action_service=self.action_service if mode == "proposed_actions" else None,
         )
         try:
             result = await service.run_assistant_command(self.identity.auth_subject, self.identity.command(mode=mode))
@@ -206,8 +251,74 @@ class HarnessApp:
             "eventStreamUrl": f"/api/session-events?sessionId={self.identity.session_id}",
             "eventCount": len(self.bridge.events),
             "events": self.bridge.events,
+            "reviewCards": self.review_cards(),
             "safety": self.safety_report(),
         }
+
+    async def decide_action(self, action_id: str, *, decision: str) -> dict[str, Any]:
+        input_data = self.identity.action_decision(action_id)
+        try:
+            if decision == "approve":
+                action = await self.action_service.approve_action(self.identity.auth_subject, input_data)
+            elif decision == "reject":
+                action = await self.action_service.reject_action(
+                    self.identity.auth_subject,
+                    {**input_data, "reasonCode": "USER_REJECTED"},
+                )
+            elif decision == "expire":
+                self.action_store.update(action_id, lambda current: {**current, "expiresAt": "2026-06-06T23:59:59.000Z"})
+                action = await self.action_service.approve_action(self.identity.auth_subject, input_data)
+            elif decision == "deny_cross_session":
+                action = await self.action_service.approve_action(
+                    self.identity.auth_subject,
+                    {**input_data, "sessionId": "session_other"},
+                )
+            else:
+                return {"status": "failed", "error": {"code": "UNSUPPORTED_DECISION", "category": "VALIDATION"}}
+            return {"status": "completed", "action": public_action(action), "reviewCards": self.review_cards(), "events": self.bridge.events, "safety": self.safety_report()}
+        except OrchestrationError as caught:
+            return {
+                "status": "failed",
+                "error": {"code": caught.code, "category": caught.category, "message": caught.message},
+                "reviewCards": self.review_cards(),
+                "events": self.bridge.events,
+                "safety": self.safety_report(),
+            }
+
+    def review_cards(self) -> list[dict[str, Any]]:
+        cards = []
+        for event in self.bridge.events:
+            if event.get("type") != EVENT_TYPE_ACTION_PROPOSED:
+                continue
+            action = self.action_store.get(event["payload"]["actionId"])
+            if not action:
+                continue
+            payload = self.payload_vault.read_payload(action["encryptedPayload"])
+            cards.append(
+                {
+                    "actionId": action["actionId"],
+                    "status": action["status"],
+                    "actionType": event["payload"]["actionType"],
+                    "summary": event["payload"]["summary"],
+                    "resourceId": event["payload"]["resourceRef"]["resourceId"],
+                    "currentText": payload.get("currentText"),
+                    "proposedText": payload.get("proposedText"),
+                    "surroundingText": payload.get("surroundingText"),
+                    "rationale": payload.get("rationale"),
+                }
+            )
+        return cards
+
+    def _create_action_service(self):
+        return create_action_service(
+            action_store=self.action_store,
+            connector=FakeActionConnector(),
+            event_publisher=self.bridge,
+            consent_service=AllowApplyConsent(),
+            payload_vault=self.payload_vault,
+            clock=lambda: datetime(2026, 6, 7, tzinfo=timezone.utc),
+            id_generator=sequential_action_id,
+        )
 
     def safety_report(self) -> dict[str, Any]:
         event_text = json.dumps(self.bridge.events, sort_keys=True)
@@ -242,7 +353,7 @@ def create_handler(app: HarnessApp):
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path != "/api/assistant-command":
+            if parsed.path not in {"/api/assistant-command", "/api/action-decision"}:
                 self._write_json(404, {"error": "not_found"})
                 return
             body = self.rfile.read(int(self.headers.get("Content-Length", "0") or "0"))
@@ -251,11 +362,21 @@ def create_handler(app: HarnessApp):
             except json.JSONDecodeError:
                 self._write_json(400, {"error": "invalid_json"})
                 return
-            mode = payload.get("mode") if isinstance(payload, dict) else "happy"
-            if mode not in {"happy", "provider_failure", "context_failure"}:
-                self._write_json(400, {"error": "unsupported_mode"})
-                return
-            result = asyncio.run(app.run_command(mode=mode))
+            if parsed.path == "/api/assistant-command":
+                mode = payload.get("mode") if isinstance(payload, dict) else "happy"
+                if mode not in {"happy", "provider_failure", "context_failure", "proposed_actions"}:
+                    self._write_json(400, {"error": "unsupported_mode"})
+                    return
+                result = asyncio.run(app.run_command(mode=mode))
+            else:
+                if not isinstance(payload, dict) or not isinstance(payload.get("actionId"), str):
+                    self._write_json(400, {"error": "invalid_action_decision"})
+                    return
+                decision = payload.get("decision")
+                if decision not in {"approve", "reject", "expire", "deny_cross_session"}:
+                    self._write_json(400, {"error": "unsupported_decision"})
+                    return
+                result = asyncio.run(app.decide_action(payload["actionId"], decision=decision))
             self._write_json(202, result)
 
         def log_message(self, _format: str, *_args: Any) -> None:
@@ -272,6 +393,25 @@ def create_handler(app: HarnessApp):
             self.wfile.write(body)
 
     return Handler
+
+
+def sequential_action_id(prefix: str) -> str:
+    sequential_action_id.counter += 1
+    return f"{prefix}_{sequential_action_id.counter:03d}"
+
+
+sequential_action_id.counter = 0
+
+
+def public_action(action: dict) -> dict[str, Any]:
+    return {
+        "actionId": action["actionId"],
+        "status": action["status"],
+        "summary": action.get("summary"),
+        "resourceId": action.get("resourceId"),
+        "expiresAt": action.get("expiresAt"),
+        "reasonCode": action.get("reasonCode"),
+    }
 
 
 def serve(host: str, port: int) -> None:
@@ -319,6 +459,7 @@ INDEX_HTML = """<!doctype html>
   <p>Local fake-backed command, orchestration, session event, SSE, and UI path.</p>
   <button id="send">Send command</button>
   <button id="fail">Run provider failure</button>
+  <button id="propose">Create proposed actions</button>
   <section>
     <h2>Command</h2>
     <p id="command-state">No command sent.</p>
@@ -328,21 +469,28 @@ INDEX_HTML = """<!doctype html>
     <div id="events"></div>
   </section>
   <section>
+    <h2>Review Cards</h2>
+    <div id="review-cards"></div>
+  </section>
+  <section>
     <h2>Safety</h2>
     <p id="safety">No safety report yet.</p>
   </section>
 </main>
   <script>
 const events = document.getElementById("events");
+const reviewCards = document.getElementById("review-cards");
 const commandState = document.getElementById("command-state");
 const safety = document.getElementById("safety");
 const seenEventIds = new Set();
 
 document.getElementById("send").addEventListener("click", () => run("happy"));
 document.getElementById("fail").addEventListener("click", () => run("provider_failure"));
+document.getElementById("propose").addEventListener("click", () => run("proposed_actions"));
 
 async function run(mode) {
   events.innerHTML = "";
+  reviewCards.innerHTML = "";
   seenEventIds.clear();
   commandState.textContent = "Sending command...";
   safety.textContent = "Waiting for safety report...";
@@ -354,12 +502,13 @@ async function run(mode) {
   const body = await response.json();
   commandState.textContent = `${body.status} with ${body.eventCount} event(s)`;
   safety.textContent = body.safety.metadataOnlyLogs ? "metadata only" : `forbidden hits: ${body.safety.forbiddenHits.join(", ")}`;
+  renderReviewCards(body.reviewCards || []);
   openStream(body.eventStreamUrl);
 }
 
 function openStream(url) {
   const source = new EventSource(url);
-  for (const type of ["progress", "assistant.delta", "assistant.final", "error"]) {
+  for (const type of ["progress", "assistant.delta", "assistant.final", "error", "action.proposed", "action.status_changed"]) {
     source.addEventListener(type, (message) => {
       if (!message.data) return;
       appendEvent(type, JSON.parse(message.data));
@@ -378,8 +527,52 @@ function appendEvent(type, event) {
   const code = document.createElement("code");
   code.textContent = event.eventId;
   const text = event.payload.messageCode || event.payload.delta || event.payload.finishReason || event.payload.errorCode || "";
+  const actionText = event.payload.actionId ? ` ${event.payload.actionId} ${event.payload.status || event.payload.summary || ""}` : "";
   row.append(label, code, document.createTextNode(` ${text}`));
+  if (actionText) row.append(document.createTextNode(actionText));
   events.appendChild(row);
+}
+
+function renderReviewCards(cards) {
+  reviewCards.innerHTML = "";
+  for (const card of cards) {
+    const row = document.createElement("article");
+    row.className = "review-card";
+    row.dataset.actionId = card.actionId;
+    const title = document.createElement("h3");
+    title.textContent = `${card.summary} (${card.status})`;
+    const diff = document.createElement("p");
+    diff.textContent = `${card.currentText || ""} -> ${card.proposedText || ""}`;
+    const approve = document.createElement("button");
+    approve.textContent = "Approve";
+    approve.addEventListener("click", () => decide(card.actionId, "approve"));
+    const reject = document.createElement("button");
+    reject.textContent = "Reject";
+    reject.addEventListener("click", () => decide(card.actionId, "reject"));
+    const expire = document.createElement("button");
+    expire.textContent = "Expire";
+    expire.addEventListener("click", () => decide(card.actionId, "expire"));
+    const deny = document.createElement("button");
+    deny.textContent = "Cross-session denial";
+    deny.addEventListener("click", () => decide(card.actionId, "deny_cross_session"));
+    row.append(title, diff, approve, reject, expire, deny);
+    reviewCards.appendChild(row);
+  }
+}
+
+async function decide(actionId, decision) {
+  const response = await fetch("/api/action-decision", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({actionId, decision})
+  });
+  const body = await response.json();
+  commandState.textContent = body.status === "completed"
+    ? `${decision} -> ${body.action.status}`
+    : `${decision} failed: ${body.error.code}`;
+  safety.textContent = body.safety.metadataOnlyLogs ? "metadata only" : `forbidden hits: ${body.safety.forbiddenHits.join(", ")}`;
+  renderReviewCards(body.reviewCards || []);
+  openStream("/api/session-events?sessionId=session_demo");
 }
 window.appendEvent = appendEvent;
 </script>

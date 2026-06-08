@@ -16,8 +16,20 @@ tracking stays in `../ai-assist-architecture/milestones/`.
 - [x] Verify emitted events are metadata-safe outside active user-visible assistant output.
 - [x] Add one-command harness runner.
 
+## Proposed Action Vertical
+
+- [x] Extend the existing assistant stream harness for proposed-action behavior.
+- [x] Add fake provider proposal output.
+- [x] Add fake action dependencies for create, approve, reject, expire, and cross-session denial.
+- [x] Emit and validate `action.proposed` and `action.status_changed` as full `SessionEvent` envelopes.
+- [x] Render browser-facing review cards and action status updates.
+- [x] Cover the happy path for propose, approve, reject, and status events.
+- [x] Cover the failure path for cross-session denial.
+- [x] Verify emitted events and stream logs exclude action payload plaintext outside active review-card state.
+- [x] Keep runtime names product-generic.
+- [x] Keep the one-command harness runner covering both assistant stream and proposed-action flows.
+
 ## Planned Evolution
 
-- Extend the same harness for durable proposed actions when that milestone starts.
 - Extend the same harness for safe Google Docs apply behavior when that milestone starts.
 - Keep one `scripts/run-tests` command as the repo grows.

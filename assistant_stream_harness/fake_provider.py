@@ -2,8 +2,9 @@ from __future__ import annotations
 
 
 class FakeProviderStream:
-    def __init__(self, *, failure: bool = False) -> None:
+    def __init__(self, *, failure: bool = False, proposals: bool = False) -> None:
         self.failure = failure
+        self.proposals = proposals
         self.requests: list[dict] = []
 
     async def stream(self, request: dict):
@@ -34,7 +35,7 @@ class FakeProviderStream:
             "model": "fake-stream-model",
             "delta": "a streamed answer.",
         }
-        yield {
+        final_event = {
             "type": "assistant.final",
             "provider": "openai",
             "model": "fake-stream-model",
@@ -45,3 +46,33 @@ class FakeProviderStream:
                 "totalTokens": 10,
             },
         }
+        if self.proposals:
+            final_event["proposalBatch"] = {
+                "proposals": [
+                    {
+                        "proposalId": "proposal_replace_intro",
+                        "actionType": "replace_text",
+                        "currentText": "Synthetic sentence with passive wording.",
+                        "proposedText": "Synthetic sentence with direct wording.",
+                        "surroundingText": "Synthetic paragraph context for active review.",
+                        "rationale": "Make the sentence clearer.",
+                        "targetHint": {
+                            "originalTextHash": "sha256:synthetic-original-intro",
+                            "targetRange": {"start": 12, "end": 49},
+                        },
+                    },
+                    {
+                        "proposalId": "proposal_replace_summary",
+                        "actionType": "replace_text",
+                        "currentText": "Synthetic summary that repeats itself.",
+                        "proposedText": "Synthetic summary with repetition removed.",
+                        "surroundingText": "Synthetic paragraph context for second review.",
+                        "rationale": "Remove repetition.",
+                        "targetHint": {
+                            "originalTextHash": "sha256:synthetic-original-summary",
+                            "targetRange": {"start": 80, "end": 116},
+                        },
+                    },
+                ]
+            }
+        yield final_event
