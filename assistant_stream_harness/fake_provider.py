@@ -58,7 +58,7 @@ class FakeProviderStream:
                         "rationale": "Make the sentence clearer.",
                         "targetHint": {
                             "originalTextHash": "sha256:synthetic-original-intro",
-                            "targetRange": {"start": 12, "end": 49},
+                            "targetRange": {"start": 12, "end": 52},
                         },
                     },
                     {
@@ -70,7 +70,7 @@ class FakeProviderStream:
                         "rationale": "Remove repetition.",
                         "targetHint": {
                             "originalTextHash": "sha256:synthetic-original-summary",
-                            "targetRange": {"start": 80, "end": 116},
+                            "targetRange": {"start": 64, "end": 102},
                         },
                     },
                 ]

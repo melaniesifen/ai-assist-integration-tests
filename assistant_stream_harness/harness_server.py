@@ -34,7 +34,7 @@ from ai_assist_session_events import (
     validate_session_event,
 )
 
-from .fake_actions import AllowApplyConsent, FakeActionConnector, FakePayloadVault
+from .fake_actions import AllowApplyConsent, FakeDocumentConnector, FakePayloadVault
 from .fake_context import AllowPolicy, FakeContextService, PromptBuilder
 from .fake_identity import FakeIdentity
 from .fake_provider import FakeProviderStream
@@ -216,6 +216,7 @@ class HarnessApp:
         self.bridge = EventBridge(self.identity)
         self.action_store = InMemoryActionStore()
         self.payload_vault = FakePayloadVault()
+        self.action_connector = FakeDocumentConnector()
         self.action_service = self._create_action_service()
 
     async def run_command(self, *, mode: str = "happy") -> dict[str, Any]:
@@ -223,6 +224,7 @@ class HarnessApp:
         if mode == "proposed_actions":
             self.action_store = InMemoryActionStore()
             self.payload_vault = FakePayloadVault()
+            self.action_connector = FakeDocumentConnector()
             sequential_action_id.counter = 0
             self.action_service = self._create_action_service()
         context_service = FakeContextService(unavailable=mode == "context_failure")
@@ -252,6 +254,7 @@ class HarnessApp:
             "eventCount": len(self.bridge.events),
             "events": self.bridge.events,
             "reviewCards": self.review_cards(),
+            "document": self.action_connector.state(),
             "safety": self.safety_report(),
         }
 
@@ -275,13 +278,46 @@ class HarnessApp:
                 )
             else:
                 return {"status": "failed", "error": {"code": "UNSUPPORTED_DECISION", "category": "VALIDATION"}}
-            return {"status": "completed", "action": public_action(action), "reviewCards": self.review_cards(), "events": self.bridge.events, "safety": self.safety_report()}
+            return {
+                "status": "completed",
+                "action": public_action(action),
+                "reviewCards": self.review_cards(),
+                "events": self.bridge.events,
+                "document": self.action_connector.state(),
+                "safety": self.safety_report(),
+            }
         except OrchestrationError as caught:
             return {
                 "status": "failed",
                 "error": {"code": caught.code, "category": caught.category, "message": caught.message},
                 "reviewCards": self.review_cards(),
                 "events": self.bridge.events,
+                "document": self.action_connector.state(),
+                "safety": self.safety_report(),
+            }
+
+    async def apply_action(self, action_id: str, *, idempotency_key: str, force_stale: bool = False) -> dict[str, Any]:
+        input_data = {**self.identity.action_decision(action_id), "idempotencyKey": idempotency_key}
+        if force_stale:
+            self.action_connector.force_stale_revision()
+        try:
+            result = await self.action_service.apply_action(self.identity.auth_subject, input_data)
+            return {
+                "status": "completed",
+                "result": result,
+                "action": public_action(self.action_store.get(action_id)),
+                "reviewCards": self.review_cards(),
+                "events": self.bridge.events,
+                "document": self.action_connector.state(),
+                "safety": self.safety_report(),
+            }
+        except OrchestrationError as caught:
+            return {
+                "status": "failed",
+                "error": {"code": caught.code, "category": caught.category, "message": caught.message},
+                "reviewCards": self.review_cards(),
+                "events": self.bridge.events,
+                "document": self.action_connector.state(),
                 "safety": self.safety_report(),
             }
 
@@ -305,6 +341,8 @@ class HarnessApp:
                     "proposedText": payload.get("proposedText"),
                     "surroundingText": payload.get("surroundingText"),
                     "rationale": payload.get("rationale"),
+                    "applyResult": action.get("applyResult"),
+                    "reasonCode": action.get("reasonCode"),
                 }
             )
         return cards
@@ -312,7 +350,7 @@ class HarnessApp:
     def _create_action_service(self):
         return create_action_service(
             action_store=self.action_store,
-            connector=FakeActionConnector(),
+            connector=self.action_connector,
             event_publisher=self.bridge,
             consent_service=AllowApplyConsent(),
             payload_vault=self.payload_vault,
@@ -353,7 +391,7 @@ def create_handler(app: HarnessApp):
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/assistant-command", "/api/action-decision"}:
+            if parsed.path not in {"/api/assistant-command", "/api/action-decision", "/api/action-apply"}:
                 self._write_json(404, {"error": "not_found"})
                 return
             body = self.rfile.read(int(self.headers.get("Content-Length", "0") or "0"))
@@ -368,7 +406,7 @@ def create_handler(app: HarnessApp):
                     self._write_json(400, {"error": "unsupported_mode"})
                     return
                 result = asyncio.run(app.run_command(mode=mode))
-            else:
+            elif parsed.path == "/api/action-decision":
                 if not isinstance(payload, dict) or not isinstance(payload.get("actionId"), str):
                     self._write_json(400, {"error": "invalid_action_decision"})
                     return
@@ -377,6 +415,21 @@ def create_handler(app: HarnessApp):
                     self._write_json(400, {"error": "unsupported_decision"})
                     return
                 result = asyncio.run(app.decide_action(payload["actionId"], decision=decision))
+            else:
+                if not isinstance(payload, dict) or not isinstance(payload.get("actionId"), str):
+                    self._write_json(400, {"error": "invalid_action_apply"})
+                    return
+                idempotency_key = payload.get("idempotencyKey")
+                if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+                    self._write_json(400, {"error": "invalid_idempotency_key"})
+                    return
+                result = asyncio.run(
+                    app.apply_action(
+                        payload["actionId"],
+                        idempotency_key=idempotency_key,
+                        force_stale=bool(payload.get("forceStale")),
+                    )
+                )
             self._write_json(202, result)
 
         def log_message(self, _format: str, *_args: Any) -> None:
@@ -460,6 +513,7 @@ INDEX_HTML = """<!doctype html>
   <button id="send">Send command</button>
   <button id="fail">Run provider failure</button>
   <button id="propose">Create proposed actions</button>
+  <button id="stale-conflict">Run stale conflict</button>
   <section>
     <h2>Command</h2>
     <p id="command-state">No command sent.</p>
@@ -473,6 +527,10 @@ INDEX_HTML = """<!doctype html>
     <div id="review-cards"></div>
   </section>
   <section>
+    <h2>Fake Document</h2>
+    <p id="document-state">No document mutation yet.</p>
+  </section>
+  <section>
     <h2>Safety</h2>
     <p id="safety">No safety report yet.</p>
   </section>
@@ -482,11 +540,13 @@ const events = document.getElementById("events");
 const reviewCards = document.getElementById("review-cards");
 const commandState = document.getElementById("command-state");
 const safety = document.getElementById("safety");
+const documentState = document.getElementById("document-state");
 const seenEventIds = new Set();
 
 document.getElementById("send").addEventListener("click", () => run("happy"));
 document.getElementById("fail").addEventListener("click", () => run("provider_failure"));
 document.getElementById("propose").addEventListener("click", () => run("proposed_actions"));
+document.getElementById("stale-conflict").addEventListener("click", runStaleConflict);
 
 async function run(mode) {
   events.innerHTML = "";
@@ -502,6 +562,7 @@ async function run(mode) {
   const body = await response.json();
   commandState.textContent = `${body.status} with ${body.eventCount} event(s)`;
   safety.textContent = body.safety.metadataOnlyLogs ? "metadata only" : `forbidden hits: ${body.safety.forbiddenHits.join(", ")}`;
+  renderDocument(body.document);
   renderReviewCards(body.reviewCards || []);
   openStream(body.eventStreamUrl);
 }
@@ -552,10 +613,16 @@ function renderReviewCards(cards) {
     const expire = document.createElement("button");
     expire.textContent = "Expire";
     expire.addEventListener("click", () => decide(card.actionId, "expire"));
+    const apply = document.createElement("button");
+    apply.textContent = "Apply";
+    apply.addEventListener("click", () => applyAction(card.actionId, "idem-demo-apply"));
+    const replay = document.createElement("button");
+    replay.textContent = "Replay same key";
+    replay.addEventListener("click", () => applyAction(card.actionId, "idem-demo-apply"));
     const deny = document.createElement("button");
     deny.textContent = "Cross-session denial";
     deny.addEventListener("click", () => decide(card.actionId, "deny_cross_session"));
-    row.append(title, diff, approve, reject, expire, deny);
+    row.append(title, diff, approve, reject, expire, apply, replay, deny);
     reviewCards.appendChild(row);
   }
 }
@@ -571,8 +638,39 @@ async function decide(actionId, decision) {
     ? `${decision} -> ${body.action.status}`
     : `${decision} failed: ${body.error.code}`;
   safety.textContent = body.safety.metadataOnlyLogs ? "metadata only" : `forbidden hits: ${body.safety.forbiddenHits.join(", ")}`;
+  renderDocument(body.document);
   renderReviewCards(body.reviewCards || []);
   openStream("/api/session-events?sessionId=session_demo");
+}
+
+async function applyAction(actionId, idempotencyKey, forceStale = false) {
+  const response = await fetch("/api/action-apply", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({actionId, idempotencyKey, forceStale})
+  });
+  const body = await response.json();
+  commandState.textContent = body.status === "completed"
+    ? `apply -> ${body.result.status} (${body.document.mutationCount} mutation(s))`
+    : `apply failed: ${body.error.code}`;
+  safety.textContent = body.safety.metadataOnlyLogs ? "metadata only" : `forbidden hits: ${body.safety.forbiddenHits.join(", ")}`;
+  renderDocument(body.document);
+  renderReviewCards(body.reviewCards || []);
+  openStream("/api/session-events?sessionId=session_demo");
+}
+
+async function runStaleConflict() {
+  await run("proposed_actions");
+  const firstCard = document.querySelector(".review-card");
+  if (!firstCard) return;
+  const actionId = firstCard.dataset.actionId;
+  await decide(actionId, "approve");
+  await applyAction(actionId, "idem-demo-stale", true);
+}
+
+function renderDocument(document) {
+  if (!document) return;
+  documentState.textContent = `${document.resourceId} ${document.revision} ${document.mutationCount} mutation(s)`;
 }
 window.appendEvent = appendEvent;
 </script>

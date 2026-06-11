@@ -108,6 +108,58 @@ class AssistantStreamHarnessTest(unittest.TestCase):
         self.assertTrue(any(event["payload"]["status"] == "EXPIRED" for event in status_events))
         self.assertTrue(expired["safety"]["metadataOnlyLogs"])
 
+    def test_apply_flow_mutates_fake_document_once_and_replays_same_key(self) -> None:
+        app = HarnessApp()
+        result = asyncio.run(app.run_command(mode="proposed_actions"))
+        action_id = result["reviewCards"][0]["actionId"]
+        asyncio.run(app.decide_action(action_id, decision="approve"))
+
+        first_apply = asyncio.run(app.apply_action(action_id, idempotency_key="idem-apply-001"))
+        replay = asyncio.run(app.apply_action(action_id, idempotency_key="idem-apply-001"))
+
+        self.assertEqual(first_apply["status"], "completed")
+        self.assertEqual(first_apply["result"]["status"], "APPLIED")
+        self.assertEqual(replay["result"], first_apply["result"])
+        self.assertEqual(first_apply["document"]["mutationCount"], 1)
+        self.assertEqual(replay["document"]["mutationCount"], 1)
+        self.assertIn("Synthetic sentence with direct wording.", replay["document"]["text"])
+        self.assertNotIn("Synthetic sentence with passive wording.", replay["document"]["text"])
+        self.assertTrue(
+            any(
+                event["type"] == "action.status_changed"
+                and event["payload"]["actionId"] == action_id
+                and event["payload"]["status"] == "APPLIED"
+                for event in replay["events"]
+            )
+        )
+        self.assertTrue(replay["safety"]["metadataOnlyLogs"])
+        self.assertNotIn("Synthetic sentence with direct wording.", json.dumps(replay["events"]))
+
+    def test_stale_apply_conflicts_without_document_mutation(self) -> None:
+        app = HarnessApp()
+        result = asyncio.run(app.run_command(mode="proposed_actions"))
+        action_id = result["reviewCards"][0]["actionId"]
+        asyncio.run(app.decide_action(action_id, decision="approve"))
+        before = app.action_connector.state()
+
+        conflicted = asyncio.run(app.apply_action(action_id, idempotency_key="idem-stale-001", force_stale=True))
+
+        self.assertEqual(conflicted["status"], "completed")
+        self.assertEqual(conflicted["result"]["status"], "CONFLICTED")
+        self.assertEqual(conflicted["result"]["reasonCode"], "RESOURCE_STALE")
+        self.assertEqual(conflicted["document"]["mutationCount"], before["mutationCount"])
+        self.assertEqual(conflicted["document"]["text"], before["text"])
+        self.assertTrue(
+            any(
+                event["type"] == "action.status_changed"
+                and event["payload"]["actionId"] == action_id
+                and event["payload"]["status"] == "CONFLICTED"
+                and event["payload"]["reasonCode"] == "RESOURCE_STALE"
+                for event in conflicted["events"]
+            )
+        )
+        self.assertTrue(conflicted["safety"]["metadataOnlyLogs"])
+
     def test_http_demo_serves_proposed_action_decision_flow(self) -> None:
         app = HarnessApp()
         server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(app))
@@ -137,11 +189,34 @@ class AssistantStreamHarnessTest(unittest.TestCase):
                 decision_body = json.loads(response.read().decode("utf-8"))
 
             self.assertEqual(decision_body["action"]["status"], "APPROVED")
+            apply_request = request.Request(
+                f"{base_url}/api/action-apply",
+                data=json.dumps({"actionId": action_id, "idempotencyKey": "idem-http-apply"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(apply_request, timeout=5) as response:
+                apply_body = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(apply_body["result"]["status"], "APPLIED")
+            self.assertEqual(apply_body["document"]["mutationCount"], 1)
+            replay_request = request.Request(
+                f"{base_url}/api/action-apply",
+                data=json.dumps({"actionId": action_id, "idempotencyKey": "idem-http-apply"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(replay_request, timeout=5) as response:
+                replay_body = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(replay_body["result"], apply_body["result"])
+            self.assertEqual(replay_body["document"]["mutationCount"], 1)
             with request.urlopen(f"{base_url}{command_body['eventStreamUrl']}", timeout=5) as response:
                 stream_body = response.read().decode("utf-8")
             self.assertIn("event: action.proposed\n", stream_body)
             self.assertIn("event: action.status_changed\n", stream_body)
-            self.assertTrue(decision_body["safety"]["metadataOnlyLogs"])
+            self.assertIn('"status":"APPLIED"', stream_body)
+            self.assertTrue(apply_body["safety"]["metadataOnlyLogs"])
         finally:
             server.shutdown()
             server.server_close()
@@ -225,6 +300,13 @@ class AssistantStreamHarnessTest(unittest.TestCase):
                 self.assertIn("APPROVED", page.locator(".review-card").nth(0).text_content())
                 page.wait_for_function(
                     "Array.from(document.querySelectorAll('.event')).some((node) => node.textContent.includes('action.status_changed'))"
+                )
+                page.locator(".review-card").nth(0).get_by_role("button", name="Apply").click()
+                page.wait_for_function("document.getElementById('command-state').textContent.includes('apply -> APPLIED')")
+                self.assertIn("1 mutation(s)", page.locator("#document-state").text_content())
+                page.locator(".review-card").nth(0).get_by_role("button", name="Replay same key").click()
+                page.wait_for_function(
+                    "document.getElementById('command-state').textContent.includes('apply -> APPLIED (1 mutation(s))')"
                 )
                 browser.close()
         finally:

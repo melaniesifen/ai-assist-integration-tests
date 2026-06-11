@@ -18,6 +18,14 @@ provider fake proposal -> orchestration proposed action -> action.proposed SSE
 -> review card -> approve/reject HTTP command -> action.status_changed SSE
 ```
 
+The harness also covers the safe-apply path:
+
+```text
+approved action -> fake Google Docs connector verification -> first apply
+-> fake document mutation -> action.status_changed APPLIED -> browser state
+-> same-key replay with no second mutation -> stale conflict with no mutation
+```
+
 The harness uses local fakes and injected dependencies. It does not call real
 cloud, Google Docs, OAuth, provider, KMS, database, or secret-storage services.
 
@@ -61,8 +69,18 @@ On each review card:
   `action.status_changed`.
 - **Expire** forces a stale action clock condition, then emits an `EXPIRED`
   status update.
+- **Apply** sends a backend-shaped apply command with a fixed idempotency key,
+  mutates the fake document once, emits `action.status_changed` with `APPLIED`,
+  and renders the fake document mutation count.
+- **Replay same key** repeats the apply command with the same idempotency key
+  and returns the original result without a second fake document mutation.
 - **Cross-session denial** sends the decision command with the wrong session ID
   and returns `ACTION_FORBIDDEN` without changing the action.
+
+Use **Run stale conflict** to create a fresh proposed action, approve it, force a
+stale fake document revision, and apply it. The harness emits
+`action.status_changed` with `CONFLICTED` and keeps the fake document mutation
+count unchanged.
 
 The **Safety** section reports whether stream logs and emitted events stayed
 metadata-only. Synthetic review text appears only in the active review card

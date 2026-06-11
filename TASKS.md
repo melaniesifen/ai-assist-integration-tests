@@ -29,7 +29,21 @@ tracking stays in `../ai-assist-architecture/milestones/`.
 - [x] Keep runtime names product-generic.
 - [x] Keep the one-command harness runner covering both assistant stream and proposed-action flows.
 
+## Safe Apply Vertical
+
+- [x] Extend the existing assistant stream harness for safe apply behavior.
+- [x] Add fake Google Docs document mutation state for safe replace behavior.
+- [x] Add approved action apply behavior through orchestration and the fake connector.
+- [x] Prove first apply mutates the fake document exactly once and emits `APPLIED`.
+- [x] Prove same idempotency key returns the original result and does not mutate twice.
+- [x] Prove stale revision returns `CONFLICTED` and leaves fake document state unchanged.
+- [x] Emit and validate `action.status_changed` for applied and conflicted paths.
+- [x] Render browser-facing applied, replay, conflicted, fake-document, and safety states.
+- [x] Verify emitted events and stream logs exclude action payload plaintext outside active review/apply state.
+- [x] Keep runtime names product-generic.
+- [x] Keep the one-command harness runner covering assistant stream, proposed-action, and safe-apply flows.
+
 ## Planned Evolution
 
-- Extend the same harness for safe Google Docs apply behavior when that milestone starts.
+- Extend the same harness for live connector smoke coverage only after the deterministic safe-apply milestone is complete.
 - Keep one `scripts/run-tests` command as the repo grows.
